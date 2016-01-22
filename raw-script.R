@@ -79,6 +79,9 @@ h + facet_grid(month ~ load_category) + geom_rug(position="jitter", size = 0.1)
 ## July 2012
 ggplot(filter(control_series, load_category == "High", month == 7), aes(x=Twb..F., y=COP)) +
     geom_point(aes(alpha = .12, color = Twb..F.), na.rm = TRUE) + 
-    scale_color_gradient(low="blue", high="red") +
+    scale_color_gradient(limits=c(50, 77),low="blue", high="red") +
     coord_cartesian(xlim = c(48, 80))
 
+
+
+## PART 2: THE EXPERIMENTAL DATA
