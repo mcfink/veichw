@@ -5,20 +5,214 @@ date: "January 21, 2016"
 output: html_document
 ---
 
-# VEIC Interview Project
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+## Order of operations in this file
+* Load in dplyr, lubridate and ggplot2 libraries
+* Read in and prepare data  
+    + Read in data
+    + Clean
+    + Add useful columns (month, coefficient of performance (COP), load (kW))
+* Explore the control year  
+    +  What problems do high wet-bulb temperatures present to the refrigeration system?  
+        1.  Breakdown by load and month  
+        2.  Example of a load / temperature situation that might cause problem  
+        3.  How big a problem might this be?  
+    +  What's the expected profile of refrigeration load?  
+        1.  Full-year load breakdown  
+        2.  Day-of-week load breakdown (some of the experimental periods are pretty short, important not to bias by day-of-week)  
+* The experimental period  
+    + Analysis  
+        1. Define the different experimental periods  
+        2. Compare load profiles for each experimental period  
+        3. Find coefficient of performance for each target pressure AND each "load category"  
+    + Find Savings  
+        1. Use 2013 experimental COPs and 2012 load distribution to predict a single effective year long COP for each target pressure
+        2. Consider the effect of the higher use of condenser fans
+        3. Consider the effect of wet bulb temperature on lower target refrigerant pressures  
+        
+## Load in dplyr, lubridate, and ggplot libraries
+```{r warning=FALSE}
+library(lubridate)  ## for date/time handling
+library(ggplot2)  ## for plotting
+library(dplyr)  ## for groupby/summarize analysis
+```
+
+## Set a few basic properties for a ggplot theme
+```{r}
+cust_theme <- theme(legend.text = element_text(size=14),
+                      legend.title = element_text(size=20),
+                      axis.text = element_text(size=14),
+                      axis.title = element_text(size=20))
+
+```
+## Read in the data, handle NA strings  
+```{r}
+## to run this code, please make sure the three .csv files are in your working directory - thanks!
+pressure_temperature <- read.csv("baseline-pressure-temp.csv", skip = 3, colClasses = c("character", "numeric", "numeric", "numeric"), na.strings = c("#N/A", "<NoData>"))
+
+load_power <- read.csv("baseline-load-power.csv",
+                       colClasses = c("character", "numeric", "numeric", "numeric"))
+
+exp_period <- read.csv("efficiency.csv", skip = 5,
+                       colClasses = c("character", "numeric", "numeric", "numeric"),
+                       na.strings = c("#N/A", "<NoData>"))
+```
+
+## Add a few columns to the dataframes:
+* date: using lubridate to make a date column that can be used for grouping by weekday and month, etc.
+* month: for quick monthly grouping of the data  
+* load.kW: converts load to kW so the coefficient of performance will be unitless  
+* COP: a coefficient of performance for the compressor that indicates how many units of heat are transferred per unit of energy expended by the compressor.
+
+Also below, the control series sheets from the original Excel file are merged:
 
 ```{r}
-summary(cars)
+## add a usable date column to each dataset
+pressure_temperature$date <- mdy_hm(pressure_temperature$Date...Time)
+load_power$date <- mdy_hm(load_power$Date...Time)
+exp_period$date <- mdy_hm(exp_period$Date...Time)
+
+## merge the pressure/temp dataset with the load power dataset
+control_series <- merge(pressure_temperature, load_power, by="date")
+
+## adding columns to control series:
+## add a month column for easy grouping by month and a weekday column for grouping by day of the week
+control_series$month <- month(control_series$date)
+control_series$weekday <- wday(control_series$date)
+exp_period$weekday <- wday(exp_period$date)
+
+## add a column with load in kW instead of tons so the coefficient of performance will be unitless
+control_series$load.kW <- control_series$Load..tons. * 3.51685
+exp_period$load.kW <- exp_period$Load..tons. * 3.51685
+
+## add a coefficient of performance
+control_series$COP <- control_series$load.kW / control_series$Refr.compressor.power..kW.
+exp_period$COP <- exp_period$load.kW / exp_period$Refr.compressor.power..kW.
+
 ```
 
-You can also embed plots, for example:
+# Exploring the Control Year
+High wet bulb temperatures can hurt efficiency of the condenser fans.  First, let's see if this was an issue during the January - April period of 2012 (our experimental period spans January through April of 2013).
+```{r, fig.width=9, fig.height=9}
+## How big a problem might high wet bulb temps present?
+## identify occurrences when condenser fans are not lowering the discharge pressure to within 1 SD of target
+## find standard deviation of discharge pressures over 2012
+P_one_sd <- sd(control_series$Discharge.pressure..psig., na.rm=TRUE)
+P_mean <- mean(control_series$Discharge.pressure..psig., na.rm=TRUE)
 
-```{r, echo=FALSE}
-plot(cars)
+## flag points above 1 SD of discharge pressure
+control_series$highP <- cut(control_series$Discharge.pressure..psig., 
+                            breaks = c(0, P_mean + P_one_sd, 500), 
+                            labels = c("normal", "high"))
+
+## add a month name column to label the facet plot
+control_series$month_name <- factor(month.name[control_series$month], 
+                                    levels= c("January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"))
+
+
+## how many "high pressure" periods by month and what fraction do they represent:
+P_by_month <- group_by(control_series, month, highP) %>%
+                summarize(n = n()) %>%
+                mutate(fraction = n / sum(n))
+high_P_by_month <- filter(P_by_month, highP == "high")
+
+## plot discharge pressure vs. wet bulb temp, highlighting those points more than 1 SD above target
+g <- ggplot(control_series, aes(x=Twb..F., y=Discharge.pressure..psig., color=highP)) + 
+    geom_point(alpha=.12,na.rm = TRUE) +
+    scale_color_manual("Pressure Status\n", labels=c("Normal", "High"), values=c("#000080", "red"))
+    coord_cartesian(xlim = c(-10, 80), ylim = c(70,180))
+
+g + facet_wrap( ~ month_name, ncol=3) + 
+    cust_theme + 
+    xlab(bquote('Wet Bulb Temperature ('^o*F*')')) + 
+    ylab("Actual Discharge Pressure (psi)") +
+    guides(colour = guide_legend(override.aes = list(alpha = 1)))
+
+```  
+
+Points highlighted on the above graph are those that are more than one standard deviation above the target (145 psi).  
+
+Here's the fraction of each of these months that see pressures that are too high (more than 1 SD above target):
+```{r fig.width=9, fig.height=9}
+## plot fraction of "high" pressure readings by month
+ggplot(high_P_by_month, aes(x=factor(month), y=fraction)) + 
+    geom_bar(stat="identity") +
+    geom_text(aes(color="white", label=round(fraction, digits=2)), vjust=1.5) +
+    cust_theme +
+    theme(legend.position="none") +
+    xlab("Month") +
+    ylab("Fraction of All Readings That Are High")
+
+```    
+
+So, while wet bulb temperatures may cause compressor pressure problems in the summer, we should have minimal problems looking at an experiment that starts in January and ends in mid-April.  
+
+## Suffering COP  
+Even though our experimental period should be relatively unaffected by high wet bulb temperatures, it would be interesting to know how much the compressor's efficiency suffers with high wet bulb temperatures.
+
+Below, I've plotted the compressor's coefficient of performance by month and "load category".  A couple trends worth noting:
+* The compressor seems to get more efficient with greater load.
+* Compressor COP standard deviation drops with greater load.
+* With high load and high wet bulb temperature, the COP also drops.
+
+```{r fig.width=9, fig.height=20}
+## how does the COP vary with wet bulb temperature at different loads?
+## cut the load index into different bins
+control_series$load_category <- cut(control_series$load.kW,
+                                    breaks = c(-1, 1, 200, 800, 1200, 2200),
+                                    labels = c("No Load", "Very Low", "Low", "Medium", "High"))
+
+## plot of all months and load categories (very low < 200kW < low < 800kW < medium < 1200kW < high < 2200kW)
+h <- ggplot(filter(control_series, load_category != "No Load"), aes(x=Twb..F., y=COP)) +
+    geom_point(aes(alpha = .12, color = Twb..F.), na.rm = TRUE) + 
+    scale_color_gradient(low="blue", high="red")
+h + facet_grid(month_name ~ load_category) + geom_rug(position="jitter", size = 0.1) +
+    cust_theme +
+    xlab(bquote('Wet Bulb Temperature ('^o*F*')')) +
+    ylab("Coefficient of Performance") +
+    ggtitle("Load Category") + 
+    theme(legend.position="none")
+
+```  
+
+Here's an example of a summer month that sees a real drop in COP at high load:
+
+```{r fig.width=9, fig.height=9}
+## example plot of COP suffering because condenser fans aren't removing enough heat before refrigerant returns to the compressor
+## July 2012
+ggplot(filter(control_series, load_category == "High", month == 7), aes(x=Twb..F., y=COP)) +
+    geom_point(aes(alpha = .12, color = Twb..F.), na.rm = TRUE) + 
+    scale_color_gradient(limits=c(50, 77),low="blue", high="red") +
+    coord_cartesian(xlim = c(48, 80)) +
+    cust_theme + 
+    theme(legend.position="none") +
+    ggtitle("July 2012") +
+    xlab(bquote('Wet Bulb Temperature ('^o*F*')')) +
+    ylab("Coefficient of Performance")
+
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+Because the experimental periods are short (two of them are only about 10 days), I thought it might also be worthwhile to make sure I didn't bias those experiments by weekday.  If one 10 day period has two full weekends whereas another has only one weekend, that might make a big difference.  Let's check to see if there's a significant difference in load profile by weekday:
+
+```{r fig.width=9, fig.height=9}
+## how much does the load depend on the day of the week?
+load_by_month_wday <- group_by(control_series, month_name, weekday, load_category) %>%
+    summarize(n = n()) %>%
+    mutate(wday_fraction = n / sum(n))
+
+i <- ggplot(load_by_month_wday, aes(x=weekday, y=wday_fraction, fill=load_category)) + geom_bar(stat="identity") + scale_fill_hue(c=45, l=80)
+i + facet_wrap(~ month_name) +
+    cust_theme +
+    ylab("Load Fraction") +
+    xlab("Day of Week") +
+    labs(fill="Load Category") +
+    scale_x_discrete(name="Day of Week", limits=c("S", "M","T","W","R","F","S"))
+ 
+```  
+
+It's clear that the load profile changes dramatically for day of the week.  This refrigerator clearly doesn't see the same load on the weekends as it does during the week.  I'll have to compensate for this during the analysis of the experimental period.
+
+## Conclusions from exploring control data:  
+* The experimental period from January through April 2013 should see minimal interference from high wet bulb temps (though it will be hard to predict the different pressures' behaviors with high wet bulb temperatures).
+* We'll have to find representative coefficients of performance for each experimental pressure and load category, then extrapolate those to year-long performance assuming a similar load profile to 2012.

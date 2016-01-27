@@ -15,7 +15,8 @@ load_power <- read.csv("baseline-load-power.csv",
                        colClasses = c("character", "numeric", "numeric", "numeric"))
 
 exp_period <- read.csv("efficiency.csv", skip = 5,
-                       colClasses = c("character", "numeric", "numeric", "numeric"))
+                       colClasses = c("character", "numeric", "numeric", "numeric"),
+                       na.strings = c("#N/A", "<NoData>"))
 
 ## add a usable date column to each dataset
 pressure_temperature$date <- mdy_hm(pressure_temperature$Date...Time)
@@ -51,6 +52,8 @@ control_series$highP <- cut(control_series$Discharge.pressure..psig.,
                             breaks = c(0, P_mean + P_one_sd, 500), 
                             labels = c("normal", "high"))
 
+control_series$month_name <- factor(month.name[control_series$month], levels= c("January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"))
+
 ## how many "high pressure" periods by month and what fraction do they represent:
 P_by_month <- group_by(control_series, month, highP) %>%
                 summarize(n = n()) %>%
@@ -62,7 +65,7 @@ g <- ggplot(control_series, aes(x=Twb..F., y=Discharge.pressure..psig.)) +
     geom_point(aes(alpha=.12, color=highP), na.rm = TRUE) +
     coord_cartesian(xlim = c(-10, 80), ylim = c(70,180))
 
-g + facet_wrap( ~ month)
+g + facet_wrap( ~ month_name, ncol=3)
 
 ## plot fraction of "high" pressure readings by month
 ggplot(high_P_by_month, aes(x=factor(month), y=fraction)) + 
@@ -177,7 +180,20 @@ ggplot(non_compressor_power_means, aes(x=load_category, y=cnpm, fill=p_label)) +
 
 ## can we say anything about how the summer months will limit the savings of a lower target pressure
 ## because the fans can't lower the temp/pressure of the refrigerant enough anyway?
-## not really
+## not really -- there's too much other stuff in the "other" category to say much
 
 ## what's the bottom line on savings?
+## here's the best case scenario:
 
+
+
+## energy projected for 365 days of 2012
+correction_factor <- (365*24*4)/nrow(control_series)
+
+total_year_heat_pumped <- sum(control_series$load.kW) * .25 * correction_factor
+projected_savings <- mutate(year_long_predicted_COPs, annual_predicted_energy = total_year_heat_pumped / expected_COP,  Ecost_per_year = annual_predicted_energy * .15)
+
+## simple bar graph of the savings
+ggplot(projected_savings, aes(x=p_label, y=Ecost_per_year, fill=p_label)) + 
+    geom_bar(stat="identity") +
+    coord_cartesian(ylim=c(200000, 250000))
