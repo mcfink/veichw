@@ -1,7 +1,7 @@
 ---
 title: "VEIC Interview Project"
 author: "Mike Fink"
-date: "January 21, 2016"
+date: "January 27, 2016"
 output: html_document
 ---
 
@@ -30,9 +30,10 @@ output: html_document
         1. Use 2013 experimental COPs and 2012 load distribution to predict a single effective year long COP for each target pressure
         2. Consider the effect of the higher use of condenser fans
         3. Consider the effect of wet bulb temperature on lower target refrigerant pressures  
+    + One last little caveat
         
 ## Load in dplyr, lubridate, and ggplot libraries
-```{r warning=FALSE}
+```{r warning=FALSE, message=FALSE}
 library(lubridate)  ## for date/time handling
 library(ggplot2)  ## for plotting
 library(dplyr)  ## for groupby/summarize analysis
@@ -40,10 +41,10 @@ library(dplyr)  ## for groupby/summarize analysis
 
 ## Set a few basic properties for a ggplot theme
 ```{r}
-cust_theme <- theme(legend.text = element_text(size=14),
-                      legend.title = element_text(size=20),
-                      axis.text = element_text(size=14),
-                      axis.title = element_text(size=20))
+cust_theme <- theme(legend.text = element_text(size=12),
+                      legend.title = element_text(size=18),
+                      axis.text = element_text(size=12),
+                      axis.title = element_text(size=18))
 
 ```
 ## Read in the data, handle NA strings  
@@ -55,7 +56,7 @@ load_power <- read.csv("baseline-load-power.csv",
                        colClasses = c("character", "numeric", "numeric", "numeric"))
 
 exp_period <- read.csv("efficiency.csv", skip = 5,
-                       colClasses = c("character", "numeric", "numeric", "numeric"),
+                       colClasses = c("character", "numeric", "numeric", "numeric", "numeric"),
                        na.strings = c("#N/A", "<NoData>"))
 ```
 
@@ -94,7 +95,7 @@ exp_period$COP <- exp_period$load.kW / exp_period$Refr.compressor.power..kW.
 
 # Exploring the Control Year
 High wet bulb temperatures can hurt efficiency of the condenser fans.  First, let's see if this was an issue during the January - April period of 2012 (our experimental period spans January through April of 2013).
-```{r, fig.width=9, fig.height=9}
+```{r, fig.width=9, fig.height=9, message=FALSE, warning=FALSE}
 ## How big a problem might high wet bulb temps present?
 ## identify occurrences when condenser fans are not lowering the discharge pressure to within 1 SD of target
 ## find standard deviation of discharge pressures over 2012
@@ -142,7 +143,7 @@ ggplot(high_P_by_month, aes(x=factor(month), y=fraction)) +
     cust_theme +
     theme(legend.position="none") +
     xlab("Month") +
-    ylab("Fraction of All Readings That Are High")
+    ylab("Fraction of All Readings That Are High Pressure")
 
 ```    
 
@@ -206,8 +207,8 @@ i + facet_wrap(~ month_name) +
     cust_theme +
     ylab("Load Fraction") +
     xlab("Day of Week") +
-    labs(fill="Load Category") +
-    scale_x_discrete(name="Day of Week", limits=c("S", "M","T","W","R","F","S"))
+    labs(fill="Load") +
+    scale_x_discrete(name="Day of Week", limits=c("S", "M","T","W","R","F","Sa"))
  
 ```  
 
@@ -215,4 +216,152 @@ It's clear that the load profile changes dramatically for day of the week.  This
 
 ## Conclusions from exploring control data:  
 * The experimental period from January through April 2013 should see minimal interference from high wet bulb temps (though it will be hard to predict the different pressures' behaviors with high wet bulb temperatures).
-* We'll have to find representative coefficients of performance for each experimental pressure and load category, then extrapolate those to year-long performance assuming a similar load profile to 2012.
+* We'll have to find representative coefficients of performance for each experimental pressure and load category, then extrapolate those to year-long performance assuming a similar load profile to 2012.  
+
+
+
+
+# The Experiment  
+## First, define when each period of the experiment started and finished
+On days when the target pressure was changed, it's not clear exactly when the change was made, so I've thrown those dates out entirely from the analysis in this section.
+
+```{r}
+## define intervals for the experimental data
+exp_period$p_label <- cut(exp_period$date, breaks= as.POSIXct(c("2012-12-31", "2013-02-03", "2013-02-05", "2013-02-19", 
+                                                                "2013-02-21", "2013-03-06", "2013-03-08", "2013-05-21")),
+                                            labels = c("p145", "t1", "p140", "t2", "p135", "t3", "p130")) 
+
+exp_period$load_category <- cut(exp_period$load.kW,
+                                    breaks = c(-1, 1, 200, 800, 1200, 2200),
+                                    labels = c("No Load", "Very Low", "Low", "Medium", "High"))
+```  
+
+## Check load similarity among experimental periods  
+Recall from the earlier section that refrigeration load varies dramatically during the week and the test periods are relatively short.  If we are going to compare the COPs from each experiment directly, the load profile should be similar among all experiments...  
+```{r fig.width=9, fig.height=9}
+## lets make sure the load profile is similar for all the periods in question
+load_by_period <- group_by(exp_period, p_label, load_category) %>%
+    summarize(n = n()) %>%
+    mutate(load_fraction = n / sum(n)) %>%
+    filter(p_label != "t1" & p_label != "t2" & p_label != "t3")
+
+## the load profiles reveal that the comparison isn't really all that fair:
+ggplot(load_by_period, aes(x=p_label, y=load_fraction, fill=load_category)) + 
+    geom_bar(stat="identity") + 
+    scale_fill_hue(c=45, l=80) +
+    cust_theme +
+    ylab("Load Fraction") +
+    xlab("Experiment Period (pressure setting (psi))") +
+    labs(fill="Load")
+
+```  
+
+... but it (the load profile) varies considerably from one experiment to the next.  The approach from here will be to compute an average COP for each load category (Very Low, Low, Medium, and High) and target compressor pressure (130, 135, 140, and 145 psi) and use those COPs combined with 2012's year-long load category profile to create an overall net COP for each pressure setting.  
+
+First, let's calculate the COP for each compressor pressure and load category, weighting the average by how much energy the compressor is consuming.  A COP taken while the compressor is consuming 50 units of energy is weighted 50 times more heavily than a COP calculated when the refrigerator is consuming 1 unit of energy:  
+```{r fig.width=9, fig.height=9}
+## let's compare COPs for each load group independently among the 4 experimental groups
+## COP averages weighted by load
+weighted_means <- group_by(exp_period, p_label, load_category) %>%
+    summarize(n = n(), sum_load = sum(load.kW), sum_compressor_power = sum(Refr.compressor.power..kW.)) %>%
+    mutate(w_mean = sum_load/sum_compressor_power) %>%
+    filter(p_label != "t1" & p_label != "t2" & p_label != "t3" & load_category != "No Load")
+
+ggplot(weighted_means, aes(x=load_category, y=w_mean, fill=p_label)) +
+    geom_bar(stat="identity",position="dodge") + 
+    scale_fill_hue(c=45, l=80) +
+    cust_theme +
+    ylab("Compressor COP") +
+    xlab("Load Category") +
+    labs(fill="Target Pressure")
+    
+```    
+
+While there's no real trend in COP at the "Low" and "Very Low" load categories, there's a very clear trend at "Medium" and "High" loads.  Great -- the experiment was at least a partial success!
+
+One more step before we get to the bottom line: we need to find typical overall loads for an entire year -- we'll use the 2012 data for that:
+
+```{r fig.width=9, fig.height=9}
+## now, assuming a load distribution like 2012's, let's estimate an average COP for each target pressure setting
+## first, what's the load distribution like for 2012?
+year_long_load <- sum(control_series$load.kW)
+control_load_fractions <- group_by(control_series, load_category) %>%
+    summarize(number = n(), load_fraction = sum(load.kW)/year_long_load)
+
+## now let's assume those load fractions will be similar for 2013 and calculate expected COPs for each load category - pressure combination:
+year_long_predicted_COPs <- merge(weighted_means, control_load_fractions, by="load_category") %>%
+    mutate(COP_contribution = load_fraction * w_mean) %>%
+    group_by(p_label) %>%
+    summarize(expected_COP = sum(COP_contribution))
+print(year_long_predicted_COPs)
+
+## plot the expected year long COPs
+ggplot(year_long_predicted_COPs, aes(x=p_label, y=expected_COP, fill=p_label)) +
+    geom_bar(stat="identity", position="dodge") +
+    scale_fill_hue(c=45, l=80) +
+    coord_cartesian(ylim = c(4.5,5.5)) +
+    cust_theme +
+    ylab("Predicted Annual Net Compressor COP") +
+    xlab("Compressor Target Pressure") +
+    theme(legend.position="none")
+```  
+
+Great!  There are the predicted, load-weighted, experiment-produced, year-long COPs for each compressor target pressure.  And good news: it looks like the experiment has produced exactly the results we'd hoped for -- the lowest compressor pressure should be the most efficient.
+
+
+Let's see if we can turn that into a year-long savings (assuming $0.15 per kWh).
+# The Important Part:
+```{r fig.width=9, fig.height=9}
+## energy projected for 365 days of 2012 -- control series is missing a few dates
+correction_factor <- (365*24*4)/nrow(control_series)
+
+total_year_heat_pumped <- sum(control_series$load.kW) * .25 * correction_factor # 15 minute data requires .25 correction factor
+projected_savings <- mutate(year_long_predicted_COPs, annual_predicted_energy = total_year_heat_pumped / expected_COP,  Ecost_per_year = annual_predicted_energy * .15) # assuming $0.15 per kWh
+
+## simple bar graph of the savings
+ggplot(projected_savings, aes(x=p_label, y=Ecost_per_year, fill=p_label)) + 
+    geom_bar(stat="identity") +
+    coord_cartesian(ylim=c(200000, 250000)) +
+    scale_fill_hue(c=45, l=80) +
+    cust_theme +
+    ylab("Predicted Annual Cost to Run Compressors (USD)") +
+    xlab("Compressor Target Pressure") +
+    theme(legend.position="none")
+
+```
+
+Woohoo!  Switching from a compressor pressure of 145 psi to 130 psi finds a savings of about $21k or ~9% of the total energy used by the compressor over the course of the year!
+
+## The little caveat  
+The above savings estimate is almost certainly a bit high.  The condenser fans are going to have to work harder at the lower compressor pressures to lower the temperature of the refrigerant, offsetting part of the savings.  Also at lower compressor pressures, the condenser fans will have trouble doing their jobs at a lower wet-bulb temperature than at higher compressor pressures (where we were already seeing some problems with the compressor!).
+
+We were given the load of the entire rest of the facility to try to detect if there was any increased use in condenser fan usage, but the data appears to be too noisy to detect this increased condenser fan load.  Perhaps if the summer were repeated in the summer the condenser fan load would be more apparent.  Even better, get the exact power consumed by the condenser fans so a net condenser fan plus compressor COP could be calculated.
+
+Here's a quick attempt I made to see if I could detect an increase in condenser fan usage within the "other" energy category.  If the condenser fans are running more at lower compressor target pressures and all else is equal, the "other" power should be highest for the lowest compressor target pressure, especially under high load conditions.  If that is happening, it's not very clear from the data:  
+
+
+```{r fig.width=9, fig.height=9}
+
+## first, get a "non-compressor" power consumption column
+exp_period$other_power <- (exp_period$Utility.power..kW. - exp_period$Refr.compressor.power..kW.)
+
+## now, we should see an increase in average "non-compressor" power at lower compressor target pressures
+non_compressor_power_means <- group_by(exp_period, p_label, load_category) %>%
+    summarize(cnpm = mean(other_power)) %>%
+    filter(p_label != "t1" & p_label != "t2" & p_label != "t3" & load_category != "No Load")
+
+ggplot(non_compressor_power_means, aes(x=load_category, y=cnpm, fill=p_label)) +
+    geom_bar(stat="identity", position = "dodge") +
+    scale_fill_hue(c=45, l=80) +
+    cust_theme +
+    ylab("Non-compressor Power Means (kW)") +
+    xlab("Compressor Load Category") +
+    labs(fill="Target Pressure")
+
+```  
+
+
+Thanks for reading and the candid advice!
+- Mike
+
+
